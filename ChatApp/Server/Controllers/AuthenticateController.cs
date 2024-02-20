@@ -1,4 +1,5 @@
 ﻿using System.IdentityModel.Tokens.Jwt;
+using System.Net;
 using System.Security.Claims;
 using ChatApp.Server.Auth;
 using ChatApp.Server.Models;
@@ -26,6 +27,9 @@ namespace ChatApp.Server.Controllers
         [Route("register")]
         public async Task<IActionResult> CreateUserAsync([FromBody] CreateUserModel model)
         {
+            if (!ModelState.IsValid)
+                return UnprocessableEntity(ModelState);
+                
             var userExists = await _userManager.FindByEmailAsync(model.UserName);
 
             if (userExists is not null) 
@@ -47,10 +51,11 @@ namespace ChatApp.Server.Controllers
 
             if (!result.Succeeded)
             {
-                return StatusCode(
+                return UnprocessableEntity(result);
+                /*return StatusCode(
                     StatusCodes.Status500InternalServerError,
                     new ResponseModel { Success = false, Message = "Erro ao criar usuário!" }
-                );
+                );*/
             }
 
             var role = model.IsAdmin ? UserRoles.Admin : UserRoles.User;
@@ -64,28 +69,28 @@ namespace ChatApp.Server.Controllers
         [Route("Login")]
         public async Task<IActionResult> LoginAsync([FromBody] LoginModel model)
         {
+            if (model.UserName is null || model.Password is null )
+                return Unauthorized();
+            
             var user = await _userManager.FindByNameAsync(model.UserName);
 
-            if (user is not null && await _userManager.CheckPasswordAsync(user, model.Password))
+            if (user is null || !await _userManager.CheckPasswordAsync(user, model.Password))
+                return Unauthorized();
+            
+            var authClaims = new List<Claim>()
             {
-                var authClaims = new List<Claim>()
-                {
-                    new (ClaimTypes.Name, user.UserName),
-                    new (JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
-                };
+                new (ClaimTypes.Name, user.UserName),
+                new (JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            };
 
-                var userRoles = await _userManager.GetRolesAsync(user);
+            var userRoles = await _userManager.GetRolesAsync(user);
 
-                foreach (var role in userRoles)
-                    authClaims.Add(new(ClaimTypes.Role, role));
+            authClaims.AddRange(userRoles.Select(role => new Claim(ClaimTypes.Role, role)));
 
-                return Ok(new ResponseModel { Data = GetToken(authClaims) });
-            }
-
-            return Unauthorized();
+            return Ok(new ResponseModel { Data = GetToken(authClaims) });
         }
 
-        private TokenModel GetToken(List<Claim> authClaims)
+        private TokenModel GetToken(IEnumerable<Claim> authClaims)
         {
             var authSigningKey = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(_configuration["JWT:Secret"]));
 
@@ -97,7 +102,7 @@ namespace ChatApp.Server.Controllers
                 signingCredentials: new SigningCredentials(authSigningKey, SecurityAlgorithms.HmacSha256)
             );
 
-            return new()
+            return new TokenModel
             {
                 Token = new JwtSecurityTokenHandler().WriteToken(token),
                 ValidTo = token.ValidTo
@@ -107,7 +112,7 @@ namespace ChatApp.Server.Controllers
         private async Task AddToRoleAsync(IdentityUser user, string role)
         {
             if (!await _roleManager.RoleExistsAsync(role))
-                await _roleManager.CreateAsync(new(role));
+                await _roleManager.CreateAsync(new IdentityRole(role));
 
             await _userManager.AddToRoleAsync(user, role);
         }
